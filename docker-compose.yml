@@ -1,0 +1,100 @@
+version: "3.9"
+
+services:
+  # ── Apache Superset ──────────────────────────────────────────────────────────
+  superset:
+    image: apache/superset:${SUPERSET_VERSION:-4.1.0}
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://superset:superset@superset-db:5432/superset
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    volumes:
+      - ./superset_config.py:/app/pythonpath/superset_config.py:ro
+      - superset_home:/app/superset_home
+    ports:
+      - "${SUPERSET_PORT:-8088}:8088"
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+      financial-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Runs once to migrate the metadata DB and create the admin user
+  superset-init:
+    image: apache/superset:${SUPERSET_VERSION:-4.1.0}
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://superset:superset@superset-db:5432/superset
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+    volumes:
+      - ./superset_config.py:/app/pythonpath/superset_config.py:ro
+      - ./scripts/superset-init.sh:/superset-init.sh:ro
+      - superset_home:/app/superset_home
+    command: ["/bin/bash", "/superset-init.sh"]
+    depends_on:
+      superset-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: "no"
+
+  # ── Superset metadata store ──────────────────────────────────────────────────
+  superset-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: superset
+      POSTGRES_USER: superset
+      POSTGRES_PASSWORD: superset
+    volumes:
+      - superset_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U superset"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Cache / async-query broker ───────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Financial dataset (streamed from relational.fel.cvut.cz on first boot) ──
+  financial-db:
+    image: mariadb:11
+    environment:
+      MARIADB_DATABASE: financial
+      MARIADB_USER: financial
+      MARIADB_PASSWORD: financial
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-rootpassword}
+    volumes:
+      - financial_db:/var/lib/mysql
+      - ./scripts/load-financial.sh:/docker-entrypoint-initdb.d/01-load-financial.sh:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+    ports:
+      - "3307:3306"
+    restart: unless-stopped
+
+volumes:
+  superset_home:
+  superset_db:
+  redis_data:
+  financial_db:
