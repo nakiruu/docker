@@ -7,6 +7,8 @@ Holdings source: Wikipedia Nasdaq-100 page, with a hardcoded fallback.
 """
 
 import os
+import re
+import sys
 import time
 import logging
 from datetime import datetime, timezone
@@ -24,10 +26,29 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://influxdb:8086")
-INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "qqq-stock-token-change-me")
+INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "")
 INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "stocks")
 INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "qqq")
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "60"))
+
+_MIN_INTERVAL = 30
+_MAX_INTERVAL = 3600
+try:
+    POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "60"))
+    if not (_MIN_INTERVAL <= POLL_INTERVAL <= _MAX_INTERVAL):
+        raise ValueError
+except ValueError:
+    log.error(
+        "POLL_INTERVAL must be an integer between %d and %d — defaulting to 60",
+        _MIN_INTERVAL, _MAX_INTERVAL,
+    )
+    POLL_INTERVAL = 60
+
+_TICKER_RE = re.compile(r"^[A-Z]{1,5}$")
+_MAX_TICKERS = 150
+
+if not INFLUXDB_TOKEN:
+    log.error("INFLUXDB_TOKEN is not set — refusing to start")
+    sys.exit(1)
 
 # Nasdaq-100 components — used when Wikipedia is unreachable (updated 2025-Q1)
 FALLBACK_TICKERS = [
@@ -43,6 +64,15 @@ FALLBACK_TICKERS = [
 ]
 
 
+def _sanitise_tickers(raw: list) -> list[str]:
+    """Accept only strings matching ^[A-Z]{1,5}$, cap at _MAX_TICKERS."""
+    valid = [t for t in raw if isinstance(t, str) and _TICKER_RE.match(t)]
+    if len(valid) > _MAX_TICKERS:
+        log.warning("Ticker list truncated from %d to %d", len(valid), _MAX_TICKERS)
+        valid = valid[:_MAX_TICKERS]
+    return valid
+
+
 def get_qqq_tickers() -> list[str]:
     """Fetch current Nasdaq-100 tickers from Wikipedia."""
     try:
@@ -50,12 +80,13 @@ def get_qqq_tickers() -> list[str]:
         for table in tables:
             for col in ("Ticker", "Symbol", "Ticker symbol", "Stock Symbol"):
                 if col in table.columns:
-                    tickers = table[col].dropna().str.strip().tolist()
+                    raw = table[col].dropna().str.strip().tolist()
+                    tickers = _sanitise_tickers(raw)
                     if len(tickers) >= 90:
                         log.info("Fetched %d tickers from Wikipedia", len(tickers))
                         return tickers
-    except Exception as exc:
-        log.warning("Wikipedia fetch failed: %s", exc)
+    except Exception:
+        log.warning("Wikipedia fetch failed — using fallback list")
 
     log.info("Using fallback ticker list (%d tickers)", len(FALLBACK_TICKERS))
     return list(FALLBACK_TICKERS)
